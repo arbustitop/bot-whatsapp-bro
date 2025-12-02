@@ -43,6 +43,9 @@ BUSINESS_NAME = os.getenv('BUSINESS_NAME', 'Bro Sublimados')
 BUSINESS_PHONE = os.getenv('BUSINESS_PHONE', '+5491112345678')
 BUSINESS_HOURS = os.getenv('BUSINESS_HOURS', 'Lunes a Viernes 9:00 - 18:00, Sábados 9:00 - 13:00')
 
+# Constantes
+MIN_ORDER_DESCRIPTION_LENGTH = 5
+
 # Estados posibles del usuario
 class UserState:
     MENU = 'menu'
@@ -55,17 +58,38 @@ class UserState:
     ESPERANDO_CONSULTA = 'esperando_consulta'
 
 # Diccionario para mantener el estado de cada usuario (por número de teléfono)
+# NOTA: Para producción con múltiples instancias, considerar usar Redis o una base de datos
+# Este almacenamiento en memoria no persiste entre reinicios del servidor
 user_states = {}
 
 # Google Sheets integration
 sheets_client = None
+
+
+def normalize_phone_number(phone):
+    """
+    Normaliza un número de teléfono eliminando caracteres no numéricos
+    excepto el signo + al inicio
+    """
+    if not phone:
+        return ""
+    # Eliminar espacios, guiones, paréntesis y otros caracteres
+    import re
+    # Mantener solo dígitos y el + inicial si existe
+    normalized = re.sub(r'[^\d+]', '', phone)
+    # Asegurar que solo haya un + al inicio
+    if normalized.startswith('+'):
+        normalized = '+' + normalized[1:].replace('+', '')
+    else:
+        normalized = normalized.replace('+', '')
+    return normalized
 
 def init_google_sheets():
     """Inicializa la conexión con Google Sheets"""
     global sheets_client
     try:
         import gspread
-        from oauth2client.service_account import ServiceAccountCredentials
+        from google.oauth2.service_account import Credentials
         
         credentials_file = os.getenv('GOOGLE_SHEETS_CREDENTIALS_FILE', 'credentials.json')
         
@@ -73,12 +97,12 @@ def init_google_sheets():
             logger.warning(f"Archivo de credenciales '{credentials_file}' no encontrado. Google Sheets deshabilitado.")
             return None
         
-        scope = [
-            'https://spreadsheets.google.com/feeds',
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
             'https://www.googleapis.com/auth/drive'
         ]
         
-        credentials = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+        credentials = Credentials.from_service_account_file(credentials_file, scopes=scopes)
         sheets_client = gspread.authorize(credentials)
         
         spreadsheet_name = os.getenv('GOOGLE_SHEETS_SPREADSHEET_NAME', 'Pedidos_Bro_Sublimados')
@@ -155,12 +179,19 @@ def buscar_pedido(consulta):
         worksheet = spreadsheet.sheet1
         all_values = worksheet.get_all_values()
         
+        # Normalizar la consulta
+        consulta_normalizada = normalize_phone_number(consulta)
+        
         # Saltamos la primera fila (encabezados)
         for i, row in enumerate(all_values[1:], start=1):
             if len(row) >= 6:
                 fecha, cliente, telefono, tipo, detalles, estado = row[:6]
-                # Buscar por número de pedido o teléfono
-                if str(i) == consulta or telefono.replace('+', '').replace(' ', '') in consulta.replace('+', '').replace(' ', ''):
+                telefono_normalizado = normalize_phone_number(telefono)
+                # Buscar por número de pedido o teléfono normalizado
+                if str(i) == consulta or (telefono_normalizado and consulta_normalizada and 
+                    (telefono_normalizado == consulta_normalizada or 
+                     telefono_normalizado.endswith(consulta_normalizada) or 
+                     consulta_normalizada.endswith(telefono_normalizado))):
                     return {
                         'numero_pedido': str(i),
                         'fecha': fecha,
@@ -234,7 +265,7 @@ def process_menu_option(phone_number, message):
 
 def process_pedido(phone_number, message, tipo, sender_name):
     """Procesa un pedido de sublimación o DTF"""
-    if len(message) < 5:
+    if len(message) < MIN_ORDER_DESCRIPTION_LENGTH:
         return f"📝 Por favor, describí tu pedido con más detalle.\n\nIncluí:\n• Producto\n• Cantidad\n• Descripción del diseño\n\nO enviá *0* para volver al menú."
     
     # Guardar el pedido
